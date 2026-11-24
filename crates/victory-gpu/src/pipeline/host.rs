@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::core::PCSTR;
 
 use super::{Shader, Translated};
-use crate::host::host;
+use crate::host::{MeshSupport, host};
 
 /// A stream's graphics state, owned (the title's stream lives only for the
 /// creation call). Subobjects the stream leaves out keep D3D12's defaults.
@@ -320,8 +320,16 @@ impl HostPipeline {
             stages.extend(find("pixel").map(|ps| (ps, D3D12_SHADER_VISIBILITY_PIXEL)));
             stages
         };
-        if mesh.is_some() && !host()?.mesh_shaders() {
-            return refuse("the host GPU has no mesh shaders (or no shader model 6.6)", shaders);
+        if mesh.is_some() {
+            match host()?.mesh_support() {
+                MeshSupport::Native => {}
+                MeshSupport::BelowSm66 => {
+                    return refuse("the host GPU does not support shader model 6.6", shaders);
+                }
+                MeshSupport::NoMeshTier => {
+                    return refuse("the host GPU supports shader model 6.6 but has no native mesh shader tier", shaders);
+                }
+            }
         }
         for (s, _) in &stages {
             s.translated()?;

@@ -35,6 +35,13 @@ pub(crate) fn texture_state(state: u32) -> u32 {
 /// ring of host descriptors is enough.
 const RTV_RING: u32 = 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MeshSupport {
+    Native,
+    NoMeshTier,
+    BelowSm66,
+}
+
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
     queue: ID3D12CommandQueue,
@@ -414,17 +421,16 @@ struct Deferred {
 }
 
 impl Host {
-    /// Whether the host runs mesh shaders at shader model 6.6 (translated
-    /// mesh shaders need both); logged once.
-    pub(crate) fn mesh_shaders(&self) -> bool {
-        static MESH: OnceLock<bool> = OnceLock::new();
+    /// Detect the shader model and native mesh tier independently, once.
+    pub(crate) fn mesh_support(&self) -> MeshSupport {
+        static MESH: OnceLock<MeshSupport> = OnceLock::new();
         *MESH.get_or_init(|| {
             let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
             let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
                 HighestShaderModel: D3D_SHADER_MODEL_6_6,
             };
             // SAFETY: each query writes its own structure of the given size.
-            let ok = unsafe {
+            let native_mesh = unsafe {
                 self.device
                     .CheckFeatureSupport(
                         D3D12_FEATURE_D3D12_OPTIONS7,
@@ -432,20 +438,28 @@ impl Host {
                         size_of_val(&options) as u32,
                     )
                     .is_ok()
-                    && self
-                        .device
-                        .CheckFeatureSupport(
-                            D3D12_FEATURE_SHADER_MODEL,
-                            (&raw mut model).cast(),
-                            size_of_val(&model) as u32,
-                        )
-                        .is_ok()
+            } && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
+            let sm66 = unsafe {
+                self.device
+                    .CheckFeatureSupport(
+                        D3D12_FEATURE_SHADER_MODEL,
+                        (&raw mut model).cast(),
+                        size_of_val(&model) as u32,
+                    )
+                    .is_ok()
+            } && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
+            let support = match (sm66, native_mesh) {
+                (false, _) => MeshSupport::BelowSm66,
+                (true, false) => MeshSupport::NoMeshTier,
+                (true, true) => MeshSupport::Native,
             };
-            let mesh = ok
-                && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
-                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
-            tracing::info!(mesh, "host mesh shader support");
-            mesh
+            tracing::info!(
+                ?support,
+                shader_model = model.HighestShaderModel.0,
+                mesh_tier = options.MeshShaderTier.0,
+                "host mesh shader support"
+            );
+            support
         })
     }
 
